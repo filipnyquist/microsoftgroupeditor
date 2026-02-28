@@ -9,25 +9,33 @@ import {
 } from "../graph.js";
 
 export interface EditUsersOptions {
-  /** Substring to search for in the department field (default: "sexistenz"). */
+  /** Item to search for in the comma-separated department field (default: "sexistenz"). */
   from: string;
-  /** Replacement value for the matched substring (default: ""). */
+  /** Replacement value for the matched item (default: ""). Empty string removes the item. */
   to: string;
   /** When true, perform the operation but only show what would change. */
   dryRun: boolean;
   /**
    * When true, sync group membership:
-   *   - Remove user from any group named after the OLD full department value.
-   *   - Add user to any group named after the NEW full department value
-   *     (skipped when the new value is empty).
+   *   - Remove user from any group named after the matched item (`from`).
+   *   - Add user to any group named after the replacement item (`to`)
+   *     (skipped when `to` is empty).
    */
   syncGroups: boolean;
 }
 
-/** Replace all occurrences of `from` in `department` with `to`. */
+/**
+ * The department field is a comma-separated list of items (e.g. "sexistenz, engineering").
+ * Split by ", ", replace any item that exactly matches `from` (case-insensitive) with `to`,
+ * remove the item entirely when `to` is empty, then re-join.
+ */
 function replaceDepartment(department: string, from: string, to: string): string {
-  // case-insensitive global replace
-  return department.replace(new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), to).trim();
+  const fromLower = from.toLowerCase();
+  const updated = department
+    .split(", ")
+    .map((item) => (item.toLowerCase() === fromLower ? to : item))
+    .filter((item) => item.length > 0);
+  return updated.join(", ");
 }
 
 /**
@@ -63,7 +71,7 @@ export async function runEditUsers(opts: EditUsersOptions): Promise<void> {
     console.log(`    Department: "${oldDept}" → "${newDept}"`);
 
     if (opts.syncGroups) {
-      await logGroupChanges(token, user, oldDept, newDept, opts.dryRun);
+      await logGroupChanges(token, user, opts.from, opts.to, opts.dryRun);
     }
 
     if (opts.dryRun) {
@@ -75,7 +83,7 @@ export async function runEditUsers(opts: EditUsersOptions): Promise<void> {
       await updateUserDepartment(token, user.id, newDept);
 
       if (opts.syncGroups) {
-        await syncGroupMembership(token, user, oldDept, newDept);
+        await syncGroupMembership(token, user, opts.from, opts.to);
       }
 
       console.log(`    ✅  Updated.\n`);
@@ -98,22 +106,22 @@ export async function runEditUsers(opts: EditUsersOptions): Promise<void> {
 async function logGroupChanges(
   token: string,
   user: GraphUser,
-  oldDept: string,
-  newDept: string,
+  fromItem: string,
+  toItem: string,
   dryRun: boolean
 ): Promise<void> {
   const prefix = dryRun ? "[dry-run] Would remove from" : "Removing from";
 
-  if (oldDept) {
-    const oldGroups = await findGroupsByName(token, oldDept);
+  if (fromItem) {
+    const oldGroups = await findGroupsByName(token, fromItem);
     for (const g of oldGroups) {
       console.log(`    ${prefix} group: "${g.displayName}"`);
     }
   }
 
-  if (newDept) {
+  if (toItem) {
     const addPrefix = dryRun ? "[dry-run] Would add to" : "Adding to";
-    const newGroups = await findGroupsByName(token, newDept);
+    const newGroups = await findGroupsByName(token, toItem);
     for (const g of newGroups) {
       console.log(`    ${addPrefix} group: "${g.displayName}"`);
     }
@@ -124,21 +132,21 @@ async function logGroupChanges(
 async function syncGroupMembership(
   token: string,
   user: GraphUser,
-  oldDept: string,
-  newDept: string
+  fromItem: string,
+  toItem: string
 ): Promise<void> {
-  // Remove from groups matching old department
-  if (oldDept) {
-    const oldGroups = await findGroupsByName(token, oldDept);
+  // Remove from groups matching the old department item
+  if (fromItem) {
+    const oldGroups = await findGroupsByName(token, fromItem);
     for (const g of oldGroups) {
       await removeUserFromGroup(token, g.id, user.id);
       console.log(`    Removed from group: "${g.displayName}"`);
     }
   }
 
-  // Add to groups matching new department
-  if (newDept) {
-    const newGroups = await findGroupsByName(token, newDept);
+  // Add to groups matching the new department item
+  if (toItem) {
+    const newGroups = await findGroupsByName(token, toItem);
     for (const g of newGroups) {
       await addUserToGroup(token, g.id, user.id);
       console.log(`    Added to group: "${g.displayName}"`);
