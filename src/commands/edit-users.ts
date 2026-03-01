@@ -24,18 +24,42 @@ export interface EditUsersOptions {
   syncGroups: boolean;
 }
 
+/** Split a comma-separated department string into trimmed, non-empty items. */
+function splitItems(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
 /**
- * The department field is a comma-separated list of items (e.g. "sexistenz, engineering").
- * Split by ", ", replace any item that exactly matches `from` (case-insensitive) with `to`,
- * remove the item entirely when `to` is empty, then re-join.
+ * The department field is a comma-separated list of items (e.g. "draften, engineering").
+ * Replace any item that exactly matches `from` (case-insensitive) with all items from `to`
+ * (which may itself be comma-separated, e.g. "draften, sexistenz").
+ * Items that already exist elsewhere in the list are not duplicated.
+ * When `to` is empty the matched item is removed entirely.
  */
 function replaceDepartment(department: string, from: string, to: string): string {
   const fromLower = from.toLowerCase();
-  const updated = department
-    .split(", ")
-    .map((item) => (item.toLowerCase() === fromLower ? to : item))
-    .filter((item) => item.length > 0);
-  return updated.join(", ");
+  const toItems = splitItems(to);
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const item of splitItems(department)) {
+    if (item.toLowerCase() === fromLower) {
+      for (const newItem of toItems) {
+        const key = newItem.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(newItem);
+        }
+      }
+    } else {
+      const key = item.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(item);
+      }
+    }
+  }
+  return result.join(", ");
 }
 
 /**
@@ -71,7 +95,7 @@ export async function runEditUsers(opts: EditUsersOptions): Promise<void> {
     console.log(`    Department: "${oldDept}" → "${newDept}"`);
 
     if (opts.syncGroups) {
-      await logGroupChanges(token, user, opts.from, opts.to, opts.dryRun);
+      await logGroupChanges(token, user, oldDept, newDept, opts.dryRun);
     }
 
     if (opts.dryRun) {
@@ -83,7 +107,7 @@ export async function runEditUsers(opts: EditUsersOptions): Promise<void> {
       await updateUserDepartment(token, user.id, newDept);
 
       if (opts.syncGroups) {
-        await syncGroupMembership(token, user, opts.from, opts.to);
+        await syncGroupMembership(token, user, oldDept, newDept);
       }
 
       console.log(`    ✅  Updated.\n`);
@@ -110,20 +134,21 @@ async function logGroupChanges(
   toItem: string,
   dryRun: boolean
 ): Promise<void> {
-  const prefix = dryRun ? "[dry-run] Would remove from" : "Removing from";
+  const { toRemove, toAdd } = diffItems(fromItem, toItem);
 
-  if (fromItem) {
-    const oldGroups = await findGroupsByName(token, fromItem);
-    for (const g of oldGroups) {
+  for (const item of toRemove) {
+    const groups = await findGroupsByName(token, item);
+    const prefix = dryRun ? "[dry-run] Would remove from" : "Removing from";
+    for (const g of groups) {
       console.log(`    ${prefix} group: "${g.displayName}"`);
     }
   }
 
-  if (toItem) {
-    const addPrefix = dryRun ? "[dry-run] Would add to" : "Adding to";
-    const newGroups = await findGroupsByName(token, toItem);
-    for (const g of newGroups) {
-      console.log(`    ${addPrefix} group: "${g.displayName}"`);
+  for (const item of toAdd) {
+    const groups = await findGroupsByName(token, item);
+    const prefix = dryRun ? "[dry-run] Would add to" : "Adding to";
+    for (const g of groups) {
+      console.log(`    ${prefix} group: "${g.displayName}"`);
     }
   }
 }
@@ -135,21 +160,40 @@ async function syncGroupMembership(
   fromItem: string,
   toItem: string
 ): Promise<void> {
-  // Remove from groups matching the old department item
-  if (fromItem) {
-    const oldGroups = await findGroupsByName(token, fromItem);
-    for (const g of oldGroups) {
+  const { toRemove, toAdd } = diffItems(fromItem, toItem);
+
+  for (const item of toRemove) {
+    const groups = await findGroupsByName(token, item);
+    for (const g of groups) {
       await removeUserFromGroup(token, g.id, user.id);
       console.log(`    Removed from group: "${g.displayName}"`);
     }
   }
 
-  // Add to groups matching the new department item
-  if (toItem) {
-    const newGroups = await findGroupsByName(token, toItem);
-    for (const g of newGroups) {
+  for (const item of toAdd) {
+    const groups = await findGroupsByName(token, item);
+    for (const g of groups) {
       await addUserToGroup(token, g.id, user.id);
       console.log(`    Added to group: "${g.displayName}"`);
     }
   }
+}
+
+/**
+ * Given the old and new department strings, return the items that should be
+ * removed from groups (items that disappeared) and those that should be
+ * added to groups (items that are new). Comparison is case-insensitive.
+ */
+function diffItems(
+  oldDept: string,
+  newDept: string
+): { toRemove: string[]; toAdd: string[] } {
+  const oldItems = splitItems(oldDept);
+  const newItems = splitItems(newDept);
+  const oldLower = new Set(oldItems.map((i) => i.toLowerCase()));
+  const newLower = new Set(newItems.map((i) => i.toLowerCase()));
+  return {
+    toRemove: oldItems.filter((i) => !newLower.has(i.toLowerCase())),
+    toAdd: newItems.filter((i) => !oldLower.has(i.toLowerCase())),
+  };
 }
